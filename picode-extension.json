@@ -32,6 +32,13 @@
       ],
       "default": "us",
       "description": "Where your Bitwarden account lives: bitwarden.com (us) or bitwarden.eu (eu)."
+    },
+    {
+      "key": "organization_id",
+      "label": "Organization id",
+      "type": "text",
+      "required": true,
+      "description": "The id in your Secrets Manager address: vault.bitwarden.com/#/sm/<this id>/…"
     }
   ]
 }

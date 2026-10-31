@@ -12,14 +12,15 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"sync"
@@ -78,6 +79,27 @@ type sourceItem struct {
 type host struct{ url, token string }
 
 type publisher interface{ publishLoop(h host) }
+
+// hostClient trusts the daemon's own certificate (PICODE_CA_FILE) so the
+// calls to PICODE_URL verify instead of failing TLS.
+func hostClient() *http.Client {
+	caFile := os.Getenv("PICODE_CA_FILE")
+	if caFile == "" {
+		return http.DefaultClient
+	}
+	pem, err := os.ReadFile(caFile)
+	if err != nil {
+		return http.DefaultClient
+	}
+	roots, err := x509.SystemCertPool()
+	if err != nil || roots == nil {
+		roots = x509.NewCertPool()
+	}
+	if !roots.AppendCertsFromPEM(pem) {
+		return http.DefaultClient
+	}
+	return &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots}}, Timeout: 15 * time.Second}
+}
 
 func main() {
 	log.SetFlags(0)
@@ -183,32 +205,27 @@ func parseRef(ref string) (project, key string, err error) {
 	return parts[0], parts[1], nil
 }
 
-// bitwardenVendor speaks the Secrets Manager REST API with the access token
-// as a Bearer. The caches hold names and ids only; a value is fetched per
-// resolve and never stored.
+// bitwardenVendor shells out to the pinned `bws` CLI (bws-v2.1.0, carried in
+// bin/): the Secrets Manager API returns E2E-encrypted payloads, and the
+// vendor's own binary does the login and decryption with the access token.
+// The token rides the environment (never argv); values are fetched per
+// resolve and never stored. The caches hold names and ids only.
 type bitwardenVendor struct {
-	region string
-	h      host
-	mu     sync.Mutex
-	// accessToken tracks what the caches were built with.
+	h           host
+	region      string
 	accessToken string
-	projects    map[string]string // name -> id
-	projectIDs  map[string]string // id -> name
-	secrets     map[string]map[string]string
 	cacheAt     time.Time
-	client      *http.Client
+	projects    map[string]string            // name -> id
+	projectIDs  map[string]string            // id -> name
+	secrets     map[string]map[string]string // project id -> key -> id
+	mu          sync.Mutex
 }
 
-func (o *bitwardenVendor) httpClient() *http.Client {
-	if o.client != nil {
-		return o.client
-	}
-	return http.DefaultClient
-}
-
-// token reads the machine account's access token from the host's sealed
-// settings. It stays in this process's memory.
+// token answers the machine account's access token: the sealed setting,
+// read once and kept in memory until the publish loop sees it change.
 func (o *bitwardenVendor) token(ctx context.Context) (string, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
 	if o.accessToken != "" {
 		return o.accessToken, nil
 	}
@@ -220,7 +237,7 @@ func (o *bitwardenVendor) token(ctx context.Context) (string, error) {
 		return "", &resolveError{class: errUnavailable}
 	}
 	req.Header.Set("X-PiCode-Extension-Token", o.h.token)
-	res, err := o.httpClient().Do(req)
+	res, err := hostClient().Do(req)
 	if err != nil {
 		return "", &resolveError{class: errUnavailable}
 	}
@@ -229,18 +246,12 @@ func (o *bitwardenVendor) token(ctx context.Context) (string, error) {
 		return "", &resolveError{class: errUnavailable}
 	}
 	var out struct {
-		Settings map[string]any `json:"settings"`
+		Secrets map[string]string `json:"secrets"`
 	}
 	if json.NewDecoder(res.Body).Decode(&out) != nil {
 		return "", &resolveError{class: errUnavailable}
 	}
-	t, _ := out.Settings["access_token"].(string)
-	if region, _ := out.Settings["region"].(string); region != "" && region != o.region {
-		o.region = region
-		o.accessToken = ""
-		o.projects, o.projectIDs, o.secrets = nil, nil, nil
-		o.cacheAt = time.Time{}
-	}
+	t := out.Secrets["access_token"]
 	if t == "" {
 		return "", &resolveError{class: errForbidden, detail: "no access token is set; connect on the extension's page"}
 	}
@@ -248,51 +259,35 @@ func (o *bitwardenVendor) token(ctx context.Context) (string, error) {
 	return t, nil
 }
 
-func (o *bitwardenVendor) get(ctx context.Context, path string, out any) error {
+// bws runs one pinned-CLI command with the access token in its environment.
+func (o *bitwardenVendor) bws(ctx context.Context, args ...string) ([]byte, error) {
 	token, err := o.token(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiBase(o.region)+path, nil)
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "./bin/bws", args...)
+	cmd.Env = append(os.Environ(), "BWS_ACCESS_TOKEN="+token)
+	if strings.EqualFold(o.region, "eu") {
+		cmd.Env = append(cmd.Env, "BWS_API_URL=https://api.bitwarden.eu")
+	}
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
-		return &resolveError{class: errUnavailable}
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	res, err := o.httpClient().Do(req)
-	if err != nil {
-		return &resolveError{class: errUnavailable, detail: "Bitwarden did not answer"}
-	}
-	defer res.Body.Close()
-	switch {
-	case res.StatusCode == http.StatusOK:
-		body, err := io.ReadAll(io.LimitReader(res.Body, 4<<20))
-		if err != nil || json.Unmarshal(body, out) != nil {
-			return &resolveError{class: errUnavailable, detail: "the answer could not be read"}
+		msg := clip(strings.TrimSpace(stderr.String()))
+		xe, ok := err.(*exec.ExitError)
+		switch {
+		case ok && xe.ExitCode() == 1 && strings.Contains(msg, "unauthorized"):
+			return nil, &resolveError{class: errRevoked, detail: "the access token was refused; connect again"}
+		case ok && xe.ExitCode() == 1:
+			return nil, &resolveError{class: errMissing, detail: msg}
+		default:
+			return nil, &resolveError{class: errUnavailable, detail: msg}
 		}
-		return nil
-	case res.StatusCode == http.StatusUnauthorized:
-		return &resolveError{class: errRevoked, detail: "the access token was refused; connect again"}
-	case res.StatusCode == http.StatusForbidden:
-		return &resolveError{class: errForbidden, detail: "the machine account cannot reach this project or secret"}
-	case res.StatusCode == http.StatusNotFound:
-		return &resolveError{class: errMissing, detail: "the project or secret is not there (or is not shared)"}
-	default:
-		raw, _ := io.ReadAll(io.LimitReader(res.Body, 512))
-		return &resolveError{class: errUnavailable, detail: clip(fmt.Sprintf("%d %s", res.StatusCode, raw))}
 	}
-}
-
-// connect resets the caches when the token changed (the publish loop's job).
-func (o *bitwardenVendor) connect(token string) {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	if o.accessToken == token && o.projects != nil {
-		return
-	}
-	o.accessToken = token
-	o.projects, o.projectIDs, o.secrets = nil, nil, nil
-	o.cacheAt = time.Time{}
-	log.Printf("connected to Bitwarden Secrets Manager")
+	return out, nil
 }
 
 func (o *bitwardenVendor) ensureCache(ctx context.Context) error {
@@ -307,28 +302,34 @@ func (o *bitwardenVendor) ensureCache(ctx context.Context) error {
 		ID   string `json:"id"`
 		Name string `json:"name"`
 	}
-	if err := o.get(ctx, "/projects", &projects); err != nil {
+	raw, err := o.bws(ctx, "project", "list")
+	if err != nil {
 		return err
+	}
+	if json.Unmarshal(raw, &projects) != nil {
+		return &resolveError{class: errUnavailable, detail: "the project list could not be read"}
 	}
 	byName, byID := map[string]string{}, map[string]string{}
 	secrets := map[string]map[string]string{}
-	for _, p := range projects {
-		byName[strings.ToLower(p.Name)] = p.ID
-		byID[p.ID] = p.Name
-		var list struct {
-			Secrets []struct {
-				ID  string `json:"id"`
-				Key string `json:"key"`
-			} `json:"secrets"`
+	for _, pr := range projects {
+		byName[strings.ToLower(pr.Name)] = pr.ID
+		byID[pr.ID] = pr.Name
+		var list []struct {
+			ID  string `json:"id"`
+			Key string `json:"key"`
 		}
-		if err := o.get(ctx, "/projects/"+url.PathEscape(p.ID)+"/secrets", &list); err != nil {
+		sraw, err := o.bws(ctx, "secret", "list", pr.ID)
+		if err != nil {
+			continue
+		}
+		if json.Unmarshal(sraw, &list) != nil {
 			continue
 		}
 		byKey := map[string]string{}
-		for _, s := range list.Secrets {
-			byKey[strings.ToLower(s.Key)] = s.ID
+		for _, sc := range list {
+			byKey[strings.ToLower(sc.Key)] = sc.ID
 		}
-		secrets[p.ID] = byKey
+		secrets[pr.ID] = byKey
 	}
 	o.mu.Lock()
 	o.projects, o.projectIDs, o.secrets, o.cacheAt = byName, byID, secrets, time.Now()
@@ -351,13 +352,14 @@ func (o *bitwardenVendor) item(ctx context.Context, project, key string) (string
 	if secretID == "" {
 		return "", &resolveError{class: errMissing, detail: fmt.Sprintf("there is no secret %q in project %q", key, projectName)}
 	}
+	raw, err := o.bws(ctx, "secret", "get", secretID)
+	if err != nil {
+		return "", err
+	}
 	var out struct {
 		Value string `json:"value"`
 	}
-	if err := o.get(ctx, "/secrets/"+url.PathEscape(secretID), &out); err != nil {
-		return "", err
-	}
-	if out.Value == "" {
+	if json.Unmarshal(raw, &out) != nil || out.Value == "" {
 		return "", &resolveError{class: errMissing, detail: fmt.Sprintf("the secret %q is empty", key)}
 	}
 	return out.Value, nil
@@ -378,6 +380,20 @@ func (o *bitwardenVendor) items(ctx context.Context) ([]sourceItem, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Label < out[j].Label })
 	return out, nil
+}
+
+// connect records the sealed token's latest value; the caches reset so the
+// next resolve republishes under it.
+func (o *bitwardenVendor) connect(token string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.accessToken == token {
+		return
+	}
+	o.accessToken = token
+	o.projects, o.projectIDs, o.secrets = nil, nil, nil
+	o.cacheAt = time.Time{}
+	log.Printf("connected to Bitwarden Secrets Manager")
 }
 
 // publishLoop keeps the tab's names current: read the access token back
@@ -408,7 +424,7 @@ func publishItems(h host, items []sourceItem) {
 	}
 	req.Header.Set("X-PiCode-Extension-Token", h.token)
 	req.Header.Set("Content-Type", "application/json")
-	res, err := http.DefaultClient.Do(req)
+	res, err := hostClient().Do(req)
 	if err != nil {
 		log.Printf("publish: %v", err)
 		return
