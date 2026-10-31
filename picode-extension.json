@@ -1,0 +1,26 @@
+{
+  "id": "bitwarden",
+  "name": "Bitwarden Secrets Manager",
+  "version": "0.1.0",
+  "apiVersion": 18,
+  "publisher": "cognixws",
+  "description": "Resolve the keys your agents ask for from Bitwarden Secrets Manager. Connect a machine account access token scoped to the projects you want to share.",
+  "icon": "icon.png",
+  "vaultSource": true,
+  "permissions": [
+    "vaults:publish"
+  ],
+  "process": {
+    "command": "./bin/picode-bitwarden",
+    "args": []
+  },
+  "settings": [
+    {
+      "key": "access_token",
+      "label": "Machine account access token",
+      "type": "secret",
+      "required": true,
+      "description": "Secrets Manager → Machine accounts → your account → Generate access token. It stays sealed here and is never shown again."
+    }
+  ]
+}

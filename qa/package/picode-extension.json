@@ -1,0 +1,30 @@
+{
+  "id": "bitwarden",
+  "name": "Bitwarden Secrets Manager",
+  "version": "0.1.0",
+  "apiVersion": 18,
+  "publisher": "cognixws",
+  "description": "QA build: resolves from qa/fixture.json instead of Bitwarden.",
+  "icon": "icon.png",
+  "vaultSource": true,
+  "permissions": [
+    "vaults:publish"
+  ],
+  "process": {
+    "command": "./bin/picode-bitwarden",
+    "args": [],
+    "env": {
+      "EXT_QA_MODE": "1",
+      "EXT_1PASSWORD_FAKE": "qa/fixture.json"
+    }
+  },
+  "settings": [
+    {
+      "key": "access_token",
+      "label": "Machine account access token",
+      "type": "secret",
+      "required": true,
+      "description": "Secrets Manager → Machine accounts → your account → Generate access token. It stays sealed here and is never shown again."
+    }
+  ]
+}

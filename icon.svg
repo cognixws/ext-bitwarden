@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en-us">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>404 - Page Not Found | Bitwarden</title>
+    <meta name="robots" content="noindex, follow">
+    <link rel="icon" href="https://bitwarden.com/favicon.ico" type="image/x-icon">
+    <link rel="preload" as="style" href="https://bitwarden.com/build/assets/app-CWRNn4u5.css" integrity="sha384-iffQVKLAnp2++yRnIvMfTl8ThbL5jYmUfd9MX/jfSLCK0OM9QsszSq4pqY9ksKUB" /><link rel="stylesheet" href="https://bitwarden.com/build/assets/app-CWRNn4u5.css" integrity="sha384-iffQVKLAnp2++yRnIvMfTl8ThbL5jYmUfd9MX/jfSLCK0OM9QsszSq4pqY9ksKUB" /></head>
+<body class="bg-indigoBlue min-h-screen" style="background-image: url('https://bitwarden.com/assets/3hFwAbRp0pdfStyL1jNUXW/3713a16599af668b2d36d4472a1c6540/security-cellar-new.svg'); background-position: center; background-repeat: no-repeat; background-size: 1440px auto;">
+    <div class="absolute top-0 left-0 right-0 py-6 lg:py-8">
+        <div class="max-w-8xl mx-auto px-5 lg:px-9">
+            <a href="/">
+                <img
+                    src="https://bitwarden.com/images/logo-horizontal-white.svg"
+                    alt="Bitwarden"
+                    class="h-6 lg:h-8"
+                >
+            </a>
+        </div>
+    </div>
+
+    <div class="flex items-center justify-center px-5 min-h-screen">
+        <div class="text-white text-center max-w-4xl">
+            <p class="text-2xl lg:text-4xl mb-0">Uh oh.</p>
+            <h1 class="text-[120px] my-4" style="color: white; -webkit-text-fill-color: white !important;">404</h1>
+            <p class="text-2xl lg:text-4xl mb-8">
+                It seems you have stumbled into an empty vault. The way out is easy – return to our
+                <a href="/" class="text-accent-teal hover:underline">home page</a>
+                or
+                <a href="/contact/" class="text-accent-teal hover:underline">contact us</a>.
+            </p>
+        </div>
+    </div>
+</body>
+</html>

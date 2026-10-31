@@ -1,0 +1,10 @@
+{
+  "refs": {
+    "bws://QA/api-key": "bw-fake-1",
+    "bws://QA/db-password": "pw-fake-2"
+  },
+  "items": [
+    {"ref": "bws://QA/api-key", "label": "api-key", "vault": "QA"},
+    {"ref": "bws://QA/db-password", "label": "db-password", "vault": "QA"}
+  ]
+}
