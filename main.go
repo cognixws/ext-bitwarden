@@ -26,10 +26,7 @@ import (
 	"time"
 )
 
-const (
-	apiBase     = "https://api.bitwarden.com"
-	resolvePath = "/picode/vault/resolve"
-)
+const resolvePath = "/picode/vault/resolve"
 
 const (
 	errRevoked     = "revoked"
@@ -37,6 +34,14 @@ const (
 	errMissing     = "missing"
 	errUnavailable = "unavailable"
 )
+
+// apiBase answers the Secrets Manager API for the account's cloud region.
+func apiBase(region string) string {
+	if strings.EqualFold(strings.TrimSpace(region), "eu") {
+		return "https://api.bitwarden.eu"
+	}
+	return "https://api.bitwarden.com"
+}
 
 type resolveError struct {
 	class  string
@@ -96,7 +101,7 @@ func main() {
 		v = fv
 		log.Printf("QA fixture resolver on %s", fake)
 	} else {
-		v = &bitwardenVendor{api: apiBase, h: host{url: hostURL, token: extToken}}
+		v = &bitwardenVendor{h: host{url: hostURL, token: extToken}, region: "us"}
 	}
 
 	mux := http.NewServeMux()
@@ -182,9 +187,9 @@ func parseRef(ref string) (project, key string, err error) {
 // as a Bearer. The caches hold names and ids only; a value is fetched per
 // resolve and never stored.
 type bitwardenVendor struct {
-	api string
-	h   host
-	mu  sync.Mutex
+	region string
+	h      host
+	mu     sync.Mutex
 	// accessToken tracks what the caches were built with.
 	accessToken string
 	projects    map[string]string // name -> id
@@ -230,6 +235,12 @@ func (o *bitwardenVendor) token(ctx context.Context) (string, error) {
 		return "", &resolveError{class: errUnavailable}
 	}
 	t, _ := out.Settings["access_token"].(string)
+	if region, _ := out.Settings["region"].(string); region != "" && region != o.region {
+		o.region = region
+		o.accessToken = ""
+		o.projects, o.projectIDs, o.secrets = nil, nil, nil
+		o.cacheAt = time.Time{}
+	}
 	if t == "" {
 		return "", &resolveError{class: errForbidden, detail: "no access token is set; connect on the extension's page"}
 	}
@@ -242,7 +253,7 @@ func (o *bitwardenVendor) get(ctx context.Context, path string, out any) error {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, o.api+path, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiBase(o.region)+path, nil)
 	if err != nil {
 		return &resolveError{class: errUnavailable}
 	}

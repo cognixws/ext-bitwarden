@@ -25,6 +25,17 @@
       "type": "secret",
       "required": true,
       "description": "Secrets Manager → Machine accounts → your account → Generate access token. It stays sealed here and is never shown again."
+    },
+    {
+      "key": "region",
+      "label": "Cloud region",
+      "type": "select",
+      "options": [
+        "us",
+        "eu"
+      ],
+      "default": "us",
+      "description": "Where your Bitwarden account lives: bitwarden.com (us) or bitwarden.eu (eu)."
     }
   ]
 }
