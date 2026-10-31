@@ -459,6 +459,15 @@ func newFakeVendor(path string) (vendor, error) {
 	return &fakeVendor{refs: f.Refs, itemList: f.Items}, nil
 }
 
+// publishLoop keeps the fixture's names on the Vaults tab the way the real
+// vendor publishes them, so QA sees the populated states.
+func (f *fakeVendor) publishLoop(h host) {
+	for {
+		publishItems(h, f.itemList)
+		time.Sleep(30 * time.Second)
+	}
+}
+
 func (f *fakeVendor) item(_ context.Context, project, key string) (string, error) {
 	v, ok := f.refs[fmt.Sprintf("bws://%s/%s", project, key)]
 	if !ok {
