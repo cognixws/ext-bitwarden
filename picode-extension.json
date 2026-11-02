@@ -1,12 +1,17 @@
 {
   "id": "bitwarden",
   "name": "Bitwarden Secrets Manager",
-  "version": "0.1.0",
-  "apiVersion": 18,
+  "version": "0.2.0",
+  "apiVersion": 19,
   "publisher": "cognixws",
   "description": "Resolve the keys your agents ask for from Bitwarden Secrets Manager. Connect a machine account access token scoped to the projects you want to share.",
   "icon": "icon.png",
   "vaultSource": true,
+  "browserExtension": {
+    "url": "https://github.com/bitwarden/clients/releases/download/browser-v2025.10.0/dist-chrome-2025.10.0.zip",
+    "sha256": "4a0ff4936dcf60fb89a999c762e745189aa075692d2b03730a024ac1a2dc49df",
+    "version": "2025.10.0"
+  },
   "permissions": [
     "vaults:publish"
   ],
