@@ -49,4 +49,6 @@ which COGNIX[WS] installs in the browser profiles you turn Site sign-ins on for.
 
 Unit: decryption against a fake vault (personal, item-key, deleted,
 organization and note items), the RFC 6238 vectors, wrong password and wrong
-API key. Live validation on the QA VM against Vaultwarden: pending.
+API key. Live on the QA VM against Vaultwarden (2026-11-02): the login published
+with its site and no value, `sign_in` signed an agent in through the core, and
+a refused login was reported as not signed in.
