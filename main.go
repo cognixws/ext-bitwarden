@@ -12,6 +12,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -74,6 +75,9 @@ type sourceItem struct {
 	Ref   string `json:"ref"`
 	Label string `json:"label"`
 	Vault string `json:"vault"`
+	// A login (Password Manager) names the sites it signs in to.
+	Kind  string   `json:"kind,omitempty"`
+	Sites []string `json:"sites,omitempty"`
 }
 
 type host struct{ url, token string }
@@ -112,6 +116,7 @@ func main() {
 	}
 
 	var v vendor
+	var pm *passwordManager
 	if fake := os.Getenv("EXT_1PASSWORD_FAKE"); fake != "" {
 		if os.Getenv("EXT_QA_MODE") != "1" {
 			log.Fatal("the fixture resolver answers fake values and runs only with EXT_QA_MODE=1")
@@ -124,6 +129,7 @@ func main() {
 		log.Printf("QA fixture resolver on %s", fake)
 	} else {
 		v = &bitwardenVendor{h: host{url: hostURL, token: extToken}, region: "us"}
+		pm = &passwordManager{h: host{url: hostURL, token: extToken}, client: &http.Client{Timeout: 20 * time.Second}, device: deviceID(extToken)}
 	}
 
 	mux := http.NewServeMux()
@@ -133,10 +139,29 @@ func main() {
 			return
 		}
 		var in struct {
-			Ref string `json:"ref"`
+			Ref  string `json:"ref"`
+			Kind string `json:"kind"`
 		}
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&in); err != nil || in.Ref == "" {
 			answer(w, &resolveError{class: errMissing, detail: "the resolve call carried no reference"})
+			return
+		}
+		// A site login for sign_in: username, password and the current code,
+		// to the daemon only (ADR-0388 amendment of 2026-11-02).
+		if in.Kind == "login" || strings.HasPrefix(in.Ref, "bwpm://") {
+			if in.Kind != "login" || pm == nil {
+				answer(w, &resolveError{class: errMissing, detail: "a login is only resolved for sign_in"})
+				return
+			}
+			ctx, cancel := context.WithTimeout(r.Context(), 9*time.Second)
+			defer cancel()
+			out, err := pm.login(ctx, in.Ref)
+			if err != nil {
+				answer(w, err)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(out)
 			return
 		}
 		project, key, err := parseRef(in.Ref)
@@ -163,7 +188,9 @@ func main() {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	})
 
-	if pub, ok := v.(publisher); ok && hostURL != "" && extToken != "" {
+	if bv, ok := v.(*bitwardenVendor); ok && hostURL != "" && extToken != "" {
+		go publishBoth(host{url: hostURL, token: extToken}, bv, pm)
+	} else if pub, ok := v.(publisher); ok && hostURL != "" && extToken != "" {
 		go pub.publishLoop(host{url: hostURL, token: extToken})
 	}
 
@@ -225,38 +252,96 @@ type bitwardenVendor struct {
 // read once and kept in memory until the publish loop sees it change.
 func (o *bitwardenVendor) token(ctx context.Context) (string, error) {
 	o.mu.Lock()
-	defer o.mu.Unlock()
 	if o.accessToken != "" {
-		return o.accessToken, nil
+		t := o.accessToken
+		o.mu.Unlock()
+		return t, nil
 	}
-	if o.h.url == "" || o.h.token == "" {
-		return "", &resolveError{class: errForbidden, detail: "no access token is set; connect on the extension's page"}
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, o.h.url+"/api/ext/v1/settings", nil)
+	o.mu.Unlock()
+	secrets, _, err := readSettings(ctx, o.h)
 	if err != nil {
-		return "", &resolveError{class: errUnavailable}
+		return "", err
 	}
-	req.Header.Set("X-PiCode-Extension-Token", o.h.token)
-	res, err := hostClient().Do(req)
-	if err != nil {
-		return "", &resolveError{class: errUnavailable}
-	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		return "", &resolveError{class: errUnavailable}
-	}
-	var out struct {
-		Secrets map[string]string `json:"secrets"`
-	}
-	if json.NewDecoder(res.Body).Decode(&out) != nil {
-		return "", &resolveError{class: errUnavailable}
-	}
-	t := out.Secrets["access_token"]
+	t := secrets["access_token"]
 	if t == "" {
 		return "", &resolveError{class: errForbidden, detail: "no access token is set; connect on the extension's page"}
 	}
+	o.mu.Lock()
 	o.accessToken = t
+	o.mu.Unlock()
 	return t, nil
+}
+
+// readSettings reads the extension's settings back from the host: sealed
+// secrets and plain values.
+func readSettings(ctx context.Context, h host) (map[string]string, map[string]any, error) {
+	if h.url == "" || h.token == "" {
+		return nil, nil, &resolveError{class: errForbidden, detail: "not connected; open the extension's page"}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, h.url+"/api/ext/v1/settings", nil)
+	if err != nil {
+		return nil, nil, &resolveError{class: errUnavailable}
+	}
+	req.Header.Set("X-PiCode-Extension-Token", h.token)
+	res, err := hostClient().Do(req)
+	if err != nil {
+		return nil, nil, &resolveError{class: errUnavailable}
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return nil, nil, &resolveError{class: errUnavailable}
+	}
+	var out struct {
+		Secrets map[string]string `json:"secrets"`
+		Values  map[string]any    `json:"values"`
+	}
+	if json.NewDecoder(res.Body).Decode(&out) != nil {
+		return nil, nil, &resolveError{class: errUnavailable}
+	}
+	return out.Secrets, out.Values, nil
+}
+
+// publishBoth keeps the tab's names current for both products: Secrets
+// Manager's secrets and Password Manager's logins, whichever is connected.
+func publishBoth(h host, sm *bitwardenVendor, pm *passwordManager) {
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		secrets, values, err := readSettings(ctx, h)
+		items := []sourceItem{}
+		if err == nil {
+			if t := secrets["access_token"]; t != "" {
+				sm.connect(t)
+				if got, err := sm.items(ctx); err == nil {
+					items = append(items, got...)
+				} else {
+					log.Printf("publish secrets: %v", err)
+				}
+			}
+			server, _ := values["pm_server"].(string)
+			clientID, _ := values["pm_client_id"].(string)
+			pm.use(pmSettings{server: server, clientID: strings.TrimSpace(clientID), clientSecret: secrets["pm_client_secret"], password: secrets["pm_password"]})
+			if pm.configured() {
+				if got, err := pm.logins(ctx); err == nil {
+					items = append(items, got...)
+				} else {
+					log.Printf("publish logins: %v", err)
+				}
+			}
+			publishItems(h, items)
+		}
+		cancel()
+		time.Sleep(30 * time.Second)
+	}
+}
+
+// deviceID is a stable device identifier for this install, so the vault lists
+// one device instead of one per start.
+func deviceID(seed string) string {
+	sum := sha256.Sum256([]byte("cognixws-bitwarden:" + seed))
+	b := sum[:16]
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 // bws runs one pinned-CLI command with the access token in its environment.
@@ -434,7 +519,7 @@ func publishItems(h host, items []sourceItem) {
 		log.Printf("publish: %d", res.StatusCode)
 		return
 	}
-	log.Printf("published %d secret names", len(items))
+	log.Printf("published %d names", len(items))
 }
 
 // fakeVendor answers from a JSON fixture. QA only: main refuses to start it

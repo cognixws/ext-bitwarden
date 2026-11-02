@@ -1,10 +1,10 @@
 {
   "id": "bitwarden",
-  "name": "Bitwarden Secrets Manager",
+  "name": "Bitwarden",
   "version": "0.2.0",
   "apiVersion": 19,
   "publisher": "cognixws",
-  "description": "Resolve the keys your agents ask for from Bitwarden Secrets Manager. Connect a machine account access token scoped to the projects you want to share.",
+  "description": "Resolve the keys your agents ask for from Bitwarden Secrets Manager, sign agents in to sites with logins from your Bitwarden vault, and offer Bitwarden's browser extension for Site sign-ins.",
   "icon": "icon.png",
   "vaultSource": true,
   "browserExtension": {
@@ -24,7 +24,7 @@
       "key": "access_token",
       "label": "Machine account access token",
       "type": "secret",
-      "required": true,
+      "required": false,
       "description": "Secrets Manager → Machine accounts → your account → Generate access token. It stays sealed here and is never shown again."
     },
     {
@@ -42,8 +42,33 @@
       "key": "organization_id",
       "label": "Organization id",
       "type": "text",
-      "required": true,
+      "required": false,
       "description": "The id in your Secrets Manager address: vault.bitwarden.com/#/sm/<this id>/…"
+    },
+    {
+      "key": "pm_server",
+      "label": "Vault address",
+      "type": "text",
+      "default": "https://vault.bitwarden.com",
+      "description": "Where your vault lives: https://vault.bitwarden.com, https://vault.bitwarden.eu, or your own server's address."
+    },
+    {
+      "key": "pm_client_id",
+      "label": "Personal API key: client_id",
+      "type": "text",
+      "description": "Web vault → Settings → Security → Keys → View API key. Signs agents in to sites with your logins; Secrets Manager does not need it."
+    },
+    {
+      "key": "pm_client_secret",
+      "label": "Personal API key: client_secret",
+      "type": "secret",
+      "description": "From the same page. It stays sealed here and is never shown again."
+    },
+    {
+      "key": "pm_password",
+      "label": "Master password",
+      "type": "secret",
+      "description": "Unlocks your logins for an agent's sign-in, which never sees them. It stays sealed here and is never shown again."
     }
   ]
 }
