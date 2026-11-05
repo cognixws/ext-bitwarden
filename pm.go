@@ -16,9 +16,11 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
+	"crypto/rsa"
 	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/sha512"
+	"crypto/x509"
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/binary"
@@ -73,6 +75,7 @@ type passwordManager struct {
 	expires  time.Time
 	ciphers  []pmCipher
 	syncedAt time.Time
+	orgKeys  map[string][]byte // organization id → its key, from the last sync
 }
 
 type pmCipher struct {
@@ -102,7 +105,7 @@ func (p *passwordManager) use(s pmSettings) {
 		return
 	}
 	p.settings = s
-	p.userKey, p.token, p.ciphers = nil, "", nil
+	p.userKey, p.token, p.ciphers, p.orgKeys = nil, "", nil, nil
 	p.expires, p.syncedAt = time.Time{}, time.Time{}
 }
 
@@ -225,37 +228,95 @@ func (p *passwordManager) email(ctx context.Context, token string) (string, erro
 }
 
 // sync answers the vault's items, read at most once a minute.
-func (p *passwordManager) sync(ctx context.Context) ([]pmCipher, []byte, error) {
+func (p *passwordManager) sync(ctx context.Context) ([]pmCipher, []byte, map[string][]byte, error) {
 	token, key, err := p.session(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	p.mu.Lock()
 	if p.ciphers != nil && time.Since(p.syncedAt) < time.Minute {
-		c := p.ciphers
+		c, o := p.ciphers, p.orgKeys
 		p.mu.Unlock()
-		return c, key, nil
+		return c, key, o, nil
 	}
 	p.mu.Unlock()
 	var out struct {
 		Ciphers []pmCipher `json:"ciphers"`
+		Profile struct {
+			PrivateKey    *string `json:"privateKey"`
+			Organizations []struct {
+				ID  string  `json:"id"`
+				Key *string `json:"key"`
+			} `json:"organizations"`
+		} `json:"profile"`
 	}
 	if err := p.get(ctx, token, "/sync?excludeDomains=true", &out); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
+	}
+	orgs := map[string][]byte{}
+	if out.Profile.PrivateKey != nil && len(out.Profile.Organizations) > 0 {
+		if priv, err := privateKey(*out.Profile.PrivateKey, key); err == nil {
+			for _, o := range out.Profile.Organizations {
+				if o.Key == nil {
+					continue
+				}
+				if k, err := decryptRSA(*o.Key, priv); err == nil && len(k) == 64 {
+					orgs[o.ID] = k
+				}
+			}
+		}
 	}
 	p.mu.Lock()
-	p.ciphers, p.syncedAt = out.Ciphers, time.Now()
+	p.ciphers, p.orgKeys, p.syncedAt = out.Ciphers, orgs, time.Now()
 	p.mu.Unlock()
-	return out.Ciphers, key, nil
+	return out.Ciphers, key, orgs, nil
+}
+
+// privateKey opens the account's RSA key, sealed with the user key.
+func privateKey(sealed string, user []byte) (*rsa.PrivateKey, error) {
+	der, err := decryptEncString(sealed, user[:32], user[32:])
+	if err != nil {
+		return nil, err
+	}
+	k, err := x509.ParsePKCS8PrivateKey(der)
+	if err != nil {
+		return nil, err
+	}
+	priv, ok := k.(*rsa.PrivateKey)
+	if !ok {
+		return nil, errors.New("the account key is not RSA")
+	}
+	return priv, nil
+}
+
+// decryptRSA opens an organization's key: RSA-OAEP with SHA-1, types 4 and 6
+// of Bitwarden's encrypted strings (6 adds a MAC that RSA does not need).
+func decryptRSA(s string, priv *rsa.PrivateKey) ([]byte, error) {
+	kind, rest, ok := strings.Cut(s, ".")
+	if !ok || (kind != "4" && kind != "6") {
+		return nil, errors.New("unsupported encryption")
+	}
+	data, err := base64.StdEncoding.DecodeString(strings.Split(rest, "|")[0])
+	if err != nil {
+		return nil, errors.New("malformed encryption")
+	}
+	return rsa.DecryptOAEP(sha1.New(), nil, priv, data, nil)
 }
 
 // itemKey is the key a cipher's fields are encrypted with: its own when it
 // carries one, else the user key.
-func itemKey(c pmCipher, user []byte) ([]byte, error) {
-	if c.Key == nil || *c.Key == "" {
-		return user, nil
+func itemKey(c pmCipher, user []byte, orgs map[string][]byte) ([]byte, error) {
+	base := user
+	if org := orgOf(c); org != "" {
+		base = orgs[org]
+		if len(base) != 64 {
+			return nil, errors.New("the organization's key could not be read")
+		}
 	}
-	k, err := decryptEncString(*c.Key, user[:32], user[32:])
+	if c.Key == nil || *c.Key == "" {
+		return base, nil
+	}
+	k, err := decryptEncString(*c.Key, base[:32], base[32:])
 	if err != nil || len(k) != 64 {
 		return nil, errors.New("the item's key could not be read")
 	}
@@ -274,22 +335,35 @@ func field(v *string, key []byte) string {
 }
 
 // usable is a personal, not deleted login.
-func usable(c pmCipher) bool {
-	return c.Type == 1 && c.Login != nil && c.DeletedDate == nil && (c.OrganizationID == nil || *c.OrganizationID == "")
+// orgOf is the organization an item belongs to, "" for a personal one.
+func orgOf(c pmCipher) string {
+	if c.OrganizationID == nil {
+		return ""
+	}
+	return *c.OrganizationID
+}
+
+// usable is a login the extension can open: personal, or in an organization
+// whose key the last sync gave.
+func usable(c pmCipher, orgs map[string][]byte) bool {
+	if org := orgOf(c); org != "" && len(orgs[org]) != 64 {
+		return false
+	}
+	return c.Type == 1 && c.Login != nil && c.DeletedDate == nil
 }
 
 // logins publishes the personal logins as names and sites, never a value.
 func (p *passwordManager) logins(ctx context.Context) ([]sourceItem, error) {
-	ciphers, user, err := p.sync(ctx)
+	ciphers, user, orgs, err := p.sync(ctx)
 	if err != nil {
 		return nil, err
 	}
 	out := []sourceItem{}
 	for _, c := range ciphers {
-		if !usable(c) {
+		if !usable(c, orgs) {
 			continue
 		}
-		key, err := itemKey(c, user)
+		key, err := itemKey(c, user, orgs)
 		if err != nil {
 			continue
 		}
@@ -320,7 +394,7 @@ func (p *passwordManager) login(ctx context.Context, ref string) (map[string]str
 	if !ok || id == "" {
 		return nil, &resolveError{class: errMissing, detail: "a login reads bwpm://<item id>"}
 	}
-	ciphers, user, err := p.sync(ctx)
+	ciphers, user, orgs, err := p.sync(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -328,10 +402,10 @@ func (p *passwordManager) login(ctx context.Context, ref string) (map[string]str
 		if c.ID != id {
 			continue
 		}
-		if !usable(c) {
-			return nil, &resolveError{class: errMissing, detail: "that item is not a personal login"}
+		if !usable(c, orgs) {
+			return nil, &resolveError{class: errMissing, detail: "that item is not a login this account can open"}
 		}
-		key, err := itemKey(c, user)
+		key, err := itemKey(c, user, orgs)
 		if err != nil {
 			return nil, &resolveError{class: errUnavailable, detail: err.Error()}
 		}

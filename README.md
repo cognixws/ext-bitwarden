@@ -35,11 +35,13 @@ owner's free account.
 
 Fill **Vault address**, your **personal API key** (web vault → Settings →
 Security → Keys) and your **master password** on the extension's page. The
-extension then publishes your personal logins' names and sites (never a value),
+extension then publishes your logins' names and sites (never a value), personal
+and those of the organizations you belong to,
 and answers a login only to the daemon when an agent calls `sign_in`; the agent
 never sees it. The vault's items are end-to-end encrypted, so the extension
 decrypts them in memory the way a Bitwarden client does (PBKDF2 or Argon2id,
-AES-CBC with HMAC), one resolve at a time. Organization items are not read yet.
+AES-CBC with HMAC), one resolve at a time. An organization's items open with its
+key, which the account's RSA key unwraps (RSA-OAEP, SHA-1).
 The API key sign-in asks no new-device email code.
 
 The manifest also declares Bitwarden's own browser extension (release, SHA-256),
@@ -47,8 +49,8 @@ which COGNIX[WS] installs in the browser profiles you turn Site sign-ins on for.
 
 ## Validated (2026-11-02)
 
-Unit: decryption against a fake vault (personal, item-key, deleted,
-organization and note items), the RFC 6238 vectors, wrong password and wrong
+Unit: decryption against a fake vault (personal, item-key, deleted, note,
+an organization's item and one whose organization key is missing), the RFC 6238 vectors, wrong password and wrong
 API key. Live on the QA VM against Vaultwarden (2026-11-02): the login published
 with its site and no value, `sign_in` signed an agent in through the core, and
 a refused login was reported as not signed in.

@@ -6,7 +6,10 @@ import (
 	"crypto/cipher"
 	"crypto/hmac"
 	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha1"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/json"
@@ -69,7 +72,20 @@ func fakeVault(t *testing.T, password string) *httptest.Server {
 	}
 	add("c1", 1, login("QA login", "qa-user@example.test", "filled-by-vault-7391", "http://localhost:8223/login", s), nil)
 	add("c2", 1, login("Gone", "u", "p", "https://gone.test", s), map[string]any{"deletedDate": deleted})
-	add("c3", 1, login("Org", "u", "p", "https://org.test", s), map[string]any{"organizationId": org})
+	// The organization's key, RSA-OAEP to the account's key, which the user key
+	// seals; its items are sealed with the organization's key.
+	rsaKey, _ := rsa.GenerateKey(rand.Reader, 2048)
+	der, _ := x509.MarshalPKCS8PrivateKey(rsaKey)
+	orgKey := make([]byte, 64)
+	_, _ = rand.Read(orgKey)
+	wrappedOrg, _ := rsa.EncryptOAEP(sha1.New(), rand.Reader, &rsaKey.PublicKey, orgKey, nil)
+	ok := func(v string) *string { x := seal(t, []byte(v), orgKey[:32], orgKey[32:]); return &x }
+	profile := map[string]any{
+		"privateKey":    seal(t, der, ue, um),
+		"organizations": []map[string]any{{"id": org, "key": "4." + base64.StdEncoding.EncodeToString(wrappedOrg)}, {"id": "org-2"}},
+	}
+	add("c3", 1, login("Org", "org-user", "org-pass", "https://org.test", ok), map[string]any{"organizationId": org})
+	add("c6", 1, login("Other org", "u", "p", "https://other.test", s), map[string]any{"organizationId": "org-2"})
 	add("c4", 1, login("Own key", "k-user", "k-pass", "github.com", ik), map[string]any{"key": wrapped})
 	add("c5", 2, map[string]any{"name": *s("A note")}, nil)
 	mux := http.NewServeMux()
@@ -101,7 +117,7 @@ func fakeVault(t *testing.T, password string) *httptest.Server {
 	})
 	mux.HandleFunc("GET /api/sync", func(w http.ResponseWriter, r *http.Request) {
 		if auth(w, r) {
-			_ = json.NewEncoder(w).Encode(map[string]any{"ciphers": ciphers})
+			_ = json.NewEncoder(w).Encode(map[string]any{"ciphers": ciphers, "profile": profile})
 		}
 	})
 	srv := httptest.NewServer(mux)
@@ -123,8 +139,8 @@ func TestPasswordManagerLoginsAndResolve(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 2 || items[0].Label != "Own key" || items[1].Label != "QA login" {
-		t.Fatalf("published: %+v (deleted, organization and note items must not be)", items)
+	if len(items) != 3 || items[0].Label != "Org" || items[1].Label != "Own key" || items[2].Label != "QA login" {
+		t.Fatalf("published: %+v (deleted, unreadable-organization and note items must not be)", items)
 	}
 	raw, _ := json.Marshal(items)
 	for _, v := range []string{"filled-by-vault", "qa-user@", "k-pass"} {
@@ -132,8 +148,11 @@ func TestPasswordManagerLoginsAndResolve(t *testing.T) {
 			t.Fatalf("the published names carry %q", v)
 		}
 	}
-	if items[1].Kind != "login" || len(items[1].Sites) != 1 || items[1].Sites[0] != "localhost" {
-		t.Fatalf("sites: %+v", items[1])
+	if items[2].Kind != "login" || len(items[2].Sites) != 1 || items[2].Sites[0] != "localhost" {
+		t.Fatalf("sites: %+v", items[2])
+	}
+	if got, err := p.login(ctx, "bwpm://c3"); err != nil || got["username"] != "org-user" || got["password"] != "org-pass" {
+		t.Fatalf("an organization's login: %v %v", got, err)
 	}
 	got, err := p.login(ctx, "bwpm://c1")
 	if err != nil || got["username"] != "qa-user@example.test" || got["password"] != "filled-by-vault-7391" || len(got["totp"]) != 6 {
@@ -142,7 +161,7 @@ func TestPasswordManagerLoginsAndResolve(t *testing.T) {
 	if got, err := p.login(ctx, "bwpm://c4"); err != nil || got["password"] != "k-pass" {
 		t.Fatalf("an item with its own key: %v %v", got, err)
 	}
-	for _, ref := range []string{"bwpm://c2", "bwpm://c3", "bwpm://c5", "bwpm://none", "c1"} {
+	for _, ref := range []string{"bwpm://c2", "bwpm://c6", "bwpm://c5", "bwpm://none", "c1"} {
 		if _, err := p.login(ctx, ref); err == nil {
 			t.Errorf("%s resolved", ref)
 		}
