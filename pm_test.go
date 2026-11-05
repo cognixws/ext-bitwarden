@@ -180,3 +180,16 @@ func TestEndpoints(t *testing.T) {
 		}
 	}
 }
+
+func TestRefusalSaysWhatTheServerSaid(t *testing.T) {
+	for _, c := range []struct{ body, want string }{
+		{`{"error":"invalid_client"}`, " (invalid_client)"},
+		{`{"error":"invalid_grant","error_description":"invalid_username_or_password","ErrorModel":{"message":"Username or password is incorrect. Try again."}}`, " (invalid_grant: invalid_username_or_password: Username or password is incorrect. Try again.)"},
+		{`not json`, ""},
+		{`{}`, ""},
+	} {
+		if got := refusal([]byte(c.body)); got != c.want {
+			t.Errorf("refusal(%s) = %q, want %q", c.body, got, c.want)
+		}
+	}
+}

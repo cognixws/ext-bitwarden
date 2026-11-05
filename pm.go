@@ -142,7 +142,7 @@ func (p *passwordManager) session(ctx context.Context) (string, []byte, error) {
 	defer res.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 	if res.StatusCode == http.StatusBadRequest || res.StatusCode == http.StatusUnauthorized {
-		return "", nil, &resolveError{class: errForbidden, detail: "the vault refused the API key; check it on the extension's page"}
+		return "", nil, &resolveError{class: errForbidden, detail: "the vault refused the API key" + refusal(body) + "; check it on the extension's page"}
 	}
 	if res.StatusCode != http.StatusOK {
 		return "", nil, &resolveError{class: errUnavailable, detail: "the vault answered " + res.Status}
@@ -477,4 +477,30 @@ func totpNow(secret string, now time.Time) (string, error) {
 		mod *= 10
 	}
 	return fmt.Sprintf("%0*d", digits, bin%mod), nil
+}
+
+// refusal is what the identity server said when it refused a sign-in: its
+// error code and description, which never echo the key. Empty when it said
+// nothing readable.
+func refusal(body []byte) string {
+	var e struct {
+		Error       string `json:"error"`
+		Description string `json:"error_description"`
+		Model       struct {
+			Message string `json:"message"`
+		} `json:"ErrorModel"`
+	}
+	if json.Unmarshal(body, &e) != nil {
+		return ""
+	}
+	parts := []string{}
+	for _, p := range []string{e.Error, e.Description, e.Model.Message} {
+		if p = strings.TrimSpace(p); p != "" && len(p) < 200 {
+			parts = append(parts, p)
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(parts, ": ") + ")"
 }

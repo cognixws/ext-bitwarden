@@ -319,7 +319,7 @@ func publishBoth(h host, sm *bitwardenVendor, pm *passwordManager) {
 			}
 			server, _ := values["pm_server"].(string)
 			clientID, _ := values["pm_client_id"].(string)
-			pm.use(pmSettings{server: server, clientID: strings.TrimSpace(clientID), clientSecret: secrets["pm_client_secret"], password: secrets["pm_password"]})
+			pm.use(pmSettings{server: server, clientID: strings.TrimSpace(clientID), clientSecret: strings.TrimSpace(secrets["pm_client_secret"]), password: secrets["pm_password"]})
 			if pm.configured() {
 				if got, err := pm.logins(ctx); err == nil {
 					items = append(items, got...)
