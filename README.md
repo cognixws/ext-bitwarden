@@ -54,3 +54,8 @@ an organization's item and one whose organization key is missing), the RFC 6238 
 API key. Live on the QA VM against Vaultwarden (2026-11-02): the login published
 with its site and no value, `sign_in` signed an agent in through the core, and
 a refused login was reported as not signed in.
+
+## License
+
+MIT (see `LICENSE`), for the code in this repository. `bin/bws` is Bitwarden's
+Secrets Manager CLI, shipped as Bitwarden publishes it, under Bitwarden's own license.
