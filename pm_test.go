@@ -75,6 +75,12 @@ func fakeVault(t *testing.T, password string) *httptest.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /identity/connect/token", func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
+		if r.Header.Get("Bitwarden-Client-Version") == "" {
+			// bitwarden.com refuses a sign-in that does not name its client version.
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"version_header_missing"}`))
+			return
+		}
 		if r.Form.Get("grant_type") != "client_credentials" || r.Form.Get("client_secret") != "sec" {
 			w.WriteHeader(http.StatusBadRequest)
 			return
@@ -82,7 +88,7 @@ func fakeVault(t *testing.T, password string) *httptest.Server {
 		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "tok", "expires_in": 3600, "Key": seal(t, user, enc, mac), "Kdf": 0, "KdfIterations": 600000})
 	})
 	auth := func(w http.ResponseWriter, r *http.Request) bool {
-		if r.Header.Get("Authorization") != "Bearer tok" {
+		if r.Header.Get("Authorization") != "Bearer tok" || r.Header.Get("Bitwarden-Client-Version") == "" {
 			w.WriteHeader(http.StatusUnauthorized)
 			return false
 		}

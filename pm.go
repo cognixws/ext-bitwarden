@@ -135,6 +135,7 @@ func (p *passwordManager) session(ctx context.Context) (string, []byte, error) {
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Device-Type", "21")
+	clientHeaders(req)
 	res, err := p.client.Do(req)
 	if err != nil {
 		return "", nil, &resolveError{class: errUnavailable, detail: "the vault did not answer"}
@@ -186,6 +187,7 @@ func (p *passwordManager) get(ctx context.Context, token, path string, into any)
 		return &resolveError{class: errUnavailable}
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
+	clientHeaders(req)
 	res, err := p.client.Do(req)
 	if err != nil {
 		return &resolveError{class: errUnavailable, detail: "the vault did not answer"}
@@ -503,4 +505,16 @@ func refusal(body []byte) string {
 		return ""
 	}
 	return " (" + strings.Join(parts, ": ") + ")"
+}
+
+// clientVersion is the Bitwarden client version this extension speaks as.
+// bitwarden.com refuses a sign-in without it (version_header_missing,
+// measured 2026-11-04); Vaultwarden does not ask.
+const clientVersion = "2025.10.0"
+
+// clientHeaders names the client on a request to the vault, as Bitwarden's
+// own clients do.
+func clientHeaders(req *http.Request) {
+	req.Header.Set("Bitwarden-Client-Name", "cli")
+	req.Header.Set("Bitwarden-Client-Version", clientVersion)
 }

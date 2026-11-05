@@ -1,7 +1,7 @@
 {
   "id": "bitwarden",
   "name": "Bitwarden",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "apiVersion": 19,
   "publisher": "cognixws",
   "description": "Resolve the keys your agents ask for from Bitwarden Secrets Manager, sign agents in to sites with logins from your Bitwarden vault, and offer Bitwarden's browser extension for Site sign-ins.",
