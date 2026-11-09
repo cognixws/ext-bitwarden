@@ -11,6 +11,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
@@ -18,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -85,24 +87,54 @@ type host struct{ url, token string }
 type publisher interface{ publishLoop(h host) }
 
 // hostClient trusts the daemon's own certificate (PICODE_CA_FILE) so the
-// calls to PICODE_URL verify instead of failing TLS.
+// calls to PICODE_URL verify instead of failing TLS. One client and
+// transport are shared for the life of the process — a fresh transport per
+// call left an idle loopback connection behind on every publish round —
+// with the idle pool bounded and idle connections closed after 30 s. The
+// CA file is still read per call, as before; a changed file rebuilds the
+// shared client once and closes the old pool's idle connections.
+var (
+	hostMu   sync.Mutex
+	hostCA   []byte
+	hostHTTP *http.Client
+)
+
 func hostClient() *http.Client {
-	caFile := os.Getenv("PICODE_CA_FILE")
-	if caFile == "" {
+	ca, _ := os.ReadFile(os.Getenv("PICODE_CA_FILE"))
+	hostMu.Lock()
+	defer hostMu.Unlock()
+	if len(ca) == 0 {
 		return http.DefaultClient
 	}
-	pem, err := os.ReadFile(caFile)
-	if err != nil {
-		return http.DefaultClient
+	if hostHTTP != nil && bytes.Equal(ca, hostCA) {
+		return hostHTTP
 	}
 	roots, err := x509.SystemCertPool()
 	if err != nil || roots == nil {
 		roots = x509.NewCertPool()
 	}
-	if !roots.AppendCertsFromPEM(pem) {
+	if !roots.AppendCertsFromPEM(ca) {
 		return http.DefaultClient
 	}
-	return &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots}}, Timeout: 15 * time.Second}
+	if hostHTTP != nil {
+		hostHTTP.CloseIdleConnections()
+	}
+	transport := &http.Transport{
+		TLSClientConfig:     &tls.Config{RootCAs: roots},
+		MaxIdleConns:        4,
+		MaxIdleConnsPerHost: 2,
+		IdleConnTimeout:     30 * time.Second,
+	}
+	hostCA = ca
+	hostHTTP = &http.Client{Transport: transport, Timeout: 15 * time.Second}
+	return hostHTTP
+}
+
+// drainBody reads a response to its end and closes it, so the shared
+// transport keeps the connection for reuse instead of dropping it.
+func drainBody(res *http.Response) {
+	_, _ = io.Copy(io.Discard, res.Body)
+	_ = res.Body.Close()
 }
 
 func main() {
@@ -287,7 +319,7 @@ func readSettings(ctx context.Context, h host) (map[string]string, map[string]an
 	if err != nil {
 		return nil, nil, &resolveError{class: errUnavailable}
 	}
-	defer res.Body.Close()
+	defer drainBody(res)
 	if res.StatusCode != http.StatusOK {
 		return nil, nil, &resolveError{class: errUnavailable}
 	}
@@ -514,7 +546,7 @@ func publishItems(h host, items []sourceItem) {
 		log.Printf("publish: %v", err)
 		return
 	}
-	defer res.Body.Close()
+	defer drainBody(res)
 	if res.StatusCode != http.StatusOK {
 		log.Printf("publish: %d", res.StatusCode)
 		return
